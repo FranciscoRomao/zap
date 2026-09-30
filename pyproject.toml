@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zap"
+version = "0.1.0"
+description = "ZAP: neutral-atom quantum compilation (fork of BAQIS neutral-atom-compilation)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "qiskit>=1.0",
+    "qiskit_qasm3_import>=0.4",
+    "numpy>=1.24",
+    "tqdm>=4.60",
+    "matplotlib>=3.7",
+]
+
+[tool.setuptools.packages.find]
+include = ["zap*"]
