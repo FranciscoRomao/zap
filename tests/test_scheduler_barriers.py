@@ -96,3 +96,23 @@ def test_noop_barriers(strategy):
     # leading barrier has nothing before it; trailing barrier nothing after it
     for barriers in ([(0, ())], [(len(g_q), ())], [(0, ()), (len(g_q), (1, 2))]):
         assert run(Scheduler, g_q, 5, strategy, barriers=barriers) == old
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+@pytest.mark.parametrize("seed", range(30))
+def test_segment_starts(strategy, seed):
+    rng = random.Random(seed)
+    n_q = 5
+    g_q = random_gates(n_q, 40, rng)
+    full_pos = sorted(rng.sample(range(1, len(g_q)), rng.randrange(0, 4)))
+    barriers = [(p, ()) for p in full_pos] + [(rng.randrange(1, len(g_q)), (0, 1))]
+    rc = {'n_q': n_q}
+    s = Scheduler(g_q, rc, barriers=barriers)
+    getattr(s, strategy)()
+    starts = s.segment_starts()
+    bounds = [0] + starts + [len(s.list_scheduling)]
+    segs = [[i for st in s.list_scheduling[a:b] for i in st] for a, b in zip(bounds, bounds[1:])]
+    assert sorted(i for seg in segs for i in seg) == list(range(len(g_q)))
+    cuts = [0] + full_pos + [len(g_q)]
+    expected = [set(range(a, b)) for a, b in zip(cuts, cuts[1:])]
+    assert [set(seg) for seg in segs] == expected

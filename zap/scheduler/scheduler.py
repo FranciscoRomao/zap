@@ -139,6 +139,27 @@ class Scheduler:
             placed.setdefault(p, []).append(i)
         self.list_scheduling = [placed[p] for p in sorted(placed)]
 
+    def segment_starts(self):
+        """Stage indices where a new execution segment begins, cut at each full-circuit barrier.
+
+        A full barrier orders every gate before it strictly ahead of every gate after it, so no
+        stage straddles a cut. Call after ``asap_*``. Stage 0 is not listed; consecutive full
+        barriers with no gates between them yield one cut.
+        """
+        n_q = self.results_code['n_q']
+        full = [pos for pos, qs in self.barriers if len(set(qs)) == n_q]
+        seg = lambda i: sum(pos <= i for pos in full)
+        starts = []
+        prev = 0
+        for stage, gates in enumerate(self.list_scheduling):
+            ids = {seg(i) for i in gates}
+            assert len(ids) == 1, f"stage {stage} straddles a full barrier"
+            (cur,) = ids
+            if cur != prev:
+                starts.append(stage)
+                prev = cur
+        return starts
+
     def save_results(self):
         """Write ``list_scheduling`` into ``results_code['stages']`` for the placer/router."""
         stage_dict = {}

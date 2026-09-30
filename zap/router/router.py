@@ -18,7 +18,8 @@ class Router:
                  qubit_mapping: list,
                  architecture: dict,
                  placement_strategy: str='baseline',
-                 routing_strategy: str='baseline'
+                 routing_strategy: str='baseline',
+                 segment_starts: list = None
                  ):
         """
         Args:
@@ -29,6 +30,8 @@ class Router:
             architecture: Hardware timing/fidelity JSON plus optional ``routing`` overrides.
             placement_strategy: Reserved; layered modes warn and fall back in this tree.
             routing_strategy: Idle policy forwarded to ``Placer`` (e.g. ``baseline``, ``always_move``).
+            segment_starts: Optional sorted stage indices where a new execution segment begins (stage 0
+                implied). Qubit positions carry over between segments; only ``self.segments`` is split.
         """
         self.architecture = architecture
         operation_duration = self.architecture.get("operation_duration", {})
@@ -52,6 +55,8 @@ class Router:
 
         self.placement_strategy = placement_strategy
         self.routing_strategy = routing_strategy
+        self.segment_starts = sorted(set(segment_starts or []) - {0})
+        self.segments = []
 
         tmp = time.time()
         self.route_qubit()
@@ -448,8 +453,11 @@ class Router:
         self.current_mapping = list(placer.current_mapping)
         self.write_init_instruction()
 
+        cuts = [0]  # instruction index at which each segment starts; Init lands in segment 0
         for index_list_gate, list_gate in enumerate(
                 tqdm(self.list_full_gates, desc="\t\tProcessing")):
+            if index_list_gate in self.segment_starts:
+                cuts.append(len(self.results_code['instructions']))
             self.index_list_gate = index_list_gate
             self.list_gate = list_gate
 
@@ -478,3 +486,7 @@ class Router:
                 vectors = [vector for vector in vectors if vector not in execute_vectors]
 
             self.process_gate()
+
+        cuts.append(len(self.results_code['instructions']))
+        instructions = self.results_code['instructions']
+        self.segments = [instructions[a:b] for a, b in zip(cuts, cuts[1:])]

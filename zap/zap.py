@@ -11,6 +11,10 @@ from zap.simulator.simulator import Simulator
 from zap.animator.animator import Animator
 
 
+# Gates the pipeline consumes directly; a circuit using only these skips ``transpile``.
+NATIVE_GATES = frozenset({"cz", "u", "u1", "u2", "u3", "id", "barrier", "measure"})
+
+
 class Zap:
     """Compile a circuit benchmark onto a zoned neutral-atom architecture."""
 
@@ -101,6 +105,7 @@ class Zap:
         self.n_2q_gate = 0
         self.n_1q_gate = 0
         self.g_q = []
+        self.barriers = []
         benchmark_file = os.path.join(
             "benchmark",
             self.benchmark_dir,
@@ -118,45 +123,53 @@ class Zap:
 
                 # Strip trailing swaps left by Qiskit decomposition (not native to the atom model).
                 swap_remain = True
-                while swap_remain:
+                while swap_remain and circuit.data:
                     if circuit.data[-1][0].name == 'swap':
                         circuit.data.pop()
                     else:
                         swap_remain = False
 
                 n_pre = circuit.num_qubits
-                # High optimization_level is very slow on wide QFT-style circuits (minutes+).
-                if n_pre <= 24:
-                    opt_level = 3
-                elif n_pre <= 64:
-                    opt_level = 2
-                elif n_pre <= 128:
-                    opt_level = 1
+                if {inst.operation.name for inst in circuit.data} <= NATIVE_GATES:
+                    print(f"[INFO] ZAP: QASM parsed ({n_pre} qubits), gates already native, skipping transpile")
+                    cz_circuit = circuit
                 else:
-                    opt_level = 0
-                print(
-                    f"[INFO] ZAP: QASM parsed ({n_pre} qubits), transpiling to CZ basis "
-                    f"(optimization_level={opt_level}, may take a while)…"
-                )
-                cz_circuit = transpile(
-                    circuit,
-                    basis_gates=["cz", "id", "u2", "u1", "u3"],
-                    optimization_level=opt_level,
-                    seed_transpiler=0
-                )
-                print(
-                    f"[INFO] ZAP: Transpile done — {cz_circuit.num_qubits} qubits, "
-                    f"{len(cz_circuit.data)} operations in DAG"
-                )
+                    # High optimization_level is very slow on wide QFT-style circuits (minutes+).
+                    if n_pre <= 24:
+                        opt_level = 3
+                    elif n_pre <= 64:
+                        opt_level = 2
+                    elif n_pre <= 128:
+                        opt_level = 1
+                    else:
+                        opt_level = 0
+                    print(
+                        f"[INFO] ZAP: QASM parsed ({n_pre} qubits), transpiling to CZ basis "
+                        f"(optimization_level={opt_level}, may take a while)…"
+                    )
+                    cz_circuit = transpile(
+                        circuit,
+                        basis_gates=["cz", "id", "u2", "u1", "u3"],
+                        optimization_level=opt_level,
+                        seed_transpiler=0
+                    )
+                    print(
+                        f"[INFO] ZAP: Transpile done — {cz_circuit.num_qubits} qubits, "
+                        f"{len(cz_circuit.data)} operations in DAG"
+                    )
                 instruction = cz_circuit.data
                 self.results_code['n_q'] = cz_circuit.num_qubits
                 for inst in instruction:
-                    if inst.operation.num_qubits == 2:
+                    if inst.operation.name == "barrier":
+                        # Sits before the next gate; all qubits listed means a full-circuit barrier.
+                        self.barriers.append(
+                            (len(self.g_q), tuple(cz_circuit.find_bit(q).index for q in inst.qubits)))
+                    elif inst.operation.num_qubits == 2:
                         self.results_code['n_2q_gate'] += 1
-                        self.g_q.append((inst.qubits[0]._index, inst.qubits[1]._index))
-                    elif inst.operation.name != "measure" and inst.operation.name != "barrier":
+                        self.g_q.append((cz_circuit.find_bit(inst.qubits[0]).index, cz_circuit.find_bit(inst.qubits[1]).index))
+                    elif inst.operation.name != "measure":
                         self.results_code['n_1q_gate'] += 1
-                        self.g_q.append((inst.qubits[0]._index, inst.qubits[0]._index))
+                        self.g_q.append((cz_circuit.find_bit(inst.qubits[0]).index,) * 2)
             elif self.benchmark_type == "json":
                 graphs = json.load(f)
                 for q0, q1 in graphs:
@@ -220,7 +233,8 @@ class Zap:
         tmp = time.time()
         scheduler = Scheduler(
             g_q=self.g_q,
-            results_code=self.results_code
+            results_code=self.results_code,
+            barriers=self.barriers
             )
         
         if self.scheduling_strategy == "asap_separate":
@@ -247,9 +261,11 @@ class Zap:
             qubit_mapping=self.given_initial_mapping,
             architecture=self.architecture,
             placement_strategy=self.placement_strategy,
-            routing_strategy=self.routing_strategy
+            routing_strategy=self.routing_strategy,
+            segment_starts=scheduler.segment_starts()
         )
         self.results_code = router.results_code
+        self.segments = router.segments  # list of instruction lists, cut at full-circuit barriers
 
         if simulation:
             print("[INFO] ZAP: Start simulation")
