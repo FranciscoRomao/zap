@@ -4,18 +4,11 @@ class Scheduler:
     def __init__(self,
                  g_q: list,
                  results_code: dict,
-                 barriers: list = None,
                  ):
         """
         Args:
             g_q: Flat list of gates as ``(q0, q1)`` with ``q0==q1`` for 1-qubit gates.
             results_code: Mutated in place; ``stages`` is filled by ``save_results``.
-            barriers: Optional list of ``(pos, qubits)``. The barrier sits just before
-                ``g_q[pos]`` in program order (``pos == len(g_q)`` allowed); ``qubits`` is a
-                tuple of qubit ids, empty meaning all qubits. A barrier is a dependency node
-                scoped to its qubits: it waits for the latest earlier gate on each of them, and
-                every later gate touching any of them waits for it. It occupies no stage and is
-                not emitted to ``results_code``.
         """
         self.g_q = g_q
         self.results_code = results_code
@@ -24,28 +17,13 @@ class Scheduler:
             "stage": {q: {} for q in range(self.results_code['n_q'])},
             "qs_status": {}
         }
-        n_q = self.results_code['n_q']
-        self.barriers = []
-        for pos, qubits in sorted(barriers or [], key=lambda b: b[0]):
-            if not 0 <= pos <= len(g_q):
-                raise ValueError(f"barrier position {pos} outside [0, {len(g_q)}]")
-            if pos in (0, len(g_q)):
-                continue  # nothing before it or nothing after it: constrains no pair of gates
-            self.barriers.append((pos, tuple(qubits) or tuple(range(n_q))))
         self.list_scheduling = []
-
-    def _barriers_at(self, i):
-        return [qs for pos, qs in self.barriers if pos == i]
 
     def asap_joint(self):
         """ASAP over the full gate stream: each gate starts when both qubits are free."""
 
         list_qubit_stage = [0 for _ in range(self.results_code['n_q'])]
         for i, gate in enumerate(self.g_q):
-            for qs in self._barriers_at(i):
-                s = max(list_qubit_stage[q] for q in qs)
-                for q in qs:
-                    list_qubit_stage[q] = s
             stage0 = list_qubit_stage[gate[0]]
             stage1 = list_qubit_stage[gate[1]]
             stage = max(stage0, stage1)
@@ -60,10 +38,6 @@ class Scheduler:
 
     def asap_separate(self):
         """ASAP schedule for all 2q layers first, then place 1q gates without reordering 2q stages."""
-        if self.barriers:
-            self._asap_separate_barriers()
-            self.save_results()
-            return
         list_qubit_stage = [0 for _ in range(self.results_code['n_q'])]
 
         two_qubit_gates = []
@@ -108,36 +82,6 @@ class Scheduler:
                     self.list_scheduling[stage].append(i)
 
         self.save_results()
-
-    def _asap_separate_barriers(self):
-        """Barrier-aware variant of ``asap_separate``.
-
-        Every gate gets an integer position: even ``2k`` is the 1q slot before 2q layer ``k``,
-        odd ``2k+1`` is 2q layer ``k``. Gates are placed in one program-order pass (1q and 2q
-        together), so barriers constrain both kinds in both directions. Positions are then
-        compacted into stages. Unlike the legacy path, no stages are inserted after the fact.
-        """
-        n_q = self.results_code['n_q']
-        ready1 = [0] * n_q  # earliest position for the next 1q gate on q
-        ready2 = [1] * n_q  # earliest position for the next 2q gate on q
-        last = [-1] * n_q   # position of the latest gate on q
-        placed = {}
-        for i, (a, b) in enumerate(self.g_q):
-            for qs in self._barriers_at(i):
-                floor = max(last[q] for q in qs) + 1
-                for q in qs:
-                    ready1[q] = max(ready1[q], floor)
-                    ready2[q] = max(ready2[q], floor)
-            if a == b:
-                p = ready1[a] + ready1[a] % 2
-                ready1[a], ready2[a], last[a] = p, p + 1, p
-            else:
-                p = max(ready2[a], ready2[b])
-                p += 1 - p % 2
-                for q in (a, b):
-                    ready1[q], ready2[q], last[q] = p + 1, p + 2, p
-            placed.setdefault(p, []).append(i)
-        self.list_scheduling = [placed[p] for p in sorted(placed)]
 
     def save_results(self):
         """Write ``list_scheduling`` into ``results_code['stages']`` for the placer/router."""
